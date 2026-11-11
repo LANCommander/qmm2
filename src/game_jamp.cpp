@@ -14,6 +14,8 @@ Created By:
 
 #include "gameapi.hpp"
 #include "log.hpp"
+#include <cstdarg>
+#include <cstdio>
 #include <string>
 // QMM-specific JAMP header
 #include "game_jamp.h"
@@ -141,7 +143,10 @@ intptr_t JAMP_GameSupport::syscall_args(intptr_t cmd, intptr_t* args) {
     // if QMM was loaded with the OpenJK "new" API
     else if (orig_import.Print) {
         switch (cmd) {
-            ROUTE_IMPORT(Print, G_PRINT);
+            // Print was already formatted by the import wrapper below, so the
+            // finished line arrives as a single arg. "%s" keeps a literal '%'
+            // in it from being read as a format specifier by the engine.
+            case G_PRINT: orig_import.Print("%s", (const char*)args[0]); break;
             ROUTE_IMPORT(Error, G_ERROR);
             ROUTE_IMPORT(Milliseconds, G_MILLISECONDS);
             ROUTE_IMPORT(PrecisionTimerStart, G_PRECISIONTIMER_START);
@@ -1012,7 +1017,23 @@ game_export_t* JAMP_GameSupport::orig_export = nullptr;
 
 
 game_import_t JAMP_GameSupport::qmm_import = {
-        GEN_IMPORT(Print, G_PRINT),
+        // OpenJK's "new" (GetModuleAPI) API hands the mod a Print(fmt, ...) that
+        // takes real C varargs. GEN_IMPORT forwards fixed args down the syscall
+        // path, so a mod's Print("%s", line) would reach plugins as args[0]=="%s"
+        // with the text in args[1] (QMM only ever formats on the engine side).
+        // Format it here instead, and dispatch the finished line as args[0] so
+        // every plugin's syscall hook sees the real text. The G_PRINT engine
+        // route above then re-emits it with "%s".
+        (decltype(qmm_import.Print)) +[](const char* fmt, ...) {
+            char buf[8192];
+            va_list argptr;
+            va_start(argptr, fmt);
+            vsnprintf(buf, sizeof(buf), fmt, argptr);
+            va_end(argptr);
+            buf[sizeof(buf) - 1] = '\0';
+            intptr_t args[] = { (intptr_t)buf };
+            QMM::syscall_args(G_PRINT, args);
+        },
         GEN_IMPORT(Error, G_ERROR),
         GEN_IMPORT(Milliseconds, G_MILLISECONDS),
         GEN_IMPORT(PrecisionTimerStart, G_PRECISIONTIMER_START),
